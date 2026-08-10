@@ -6,13 +6,13 @@ import java.util.jar.*;
 
 public class LicenseRemover {
     private static final String[] PATTERNS = {
-        "checkLicense", "verifyLicense", "isLicensed", "hasLicense",
-        "validate", "isValid", "authenticate", "isAuthenticated",
-        "licenseKey", "getLicense", "verifyKey", "checkKey",
-        "isPremium", "hasPremium", "checkPremium", "premium",
-        "isCracked", "hasCrack", "checkCrack", "cracked",
-        "HWID", "getHWID", "getHardwareID", "hardwareId",
-        "deviceId", "machineId", "fingerprint", "serial"
+        "checkLicense","verifyLicense","isLicensed","hasLicense",
+        "validate","isValid","authenticate","isAuthenticated",
+        "licenseKey","getLicense","verifyKey","checkKey",
+        "isPremium","hasPremium","checkPremium","premium",
+        "isCracked","hasCrack","checkCrack","cracked",
+        "HWID","getHWID","getHardwareID","hardwareId",
+        "deviceId","machineId","fingerprint","serial"
     };
 
     public static void main(String[] args) throws Exception {
@@ -60,6 +60,6 @@ public class LicenseRemover {
                 jos.closeEntry();
             }
         }
-        System.out.println("[LicenseRemover] Patched " + patched + " classes");
+        System.out.println("Patched " + patched + " classes");
     }
 }

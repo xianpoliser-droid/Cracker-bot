@@ -27,9 +27,9 @@ public class URLDetector {
                 String name = entry.getName();
                 if (name.endsWith(".class") || name.endsWith(".json") || name.endsWith(".properties")) {
                     try (InputStream is = jar.getInputStream(entry)) {
-                        String content = new String(is.readAllBytes(), "UTF-8");
+                        String c = new String(is.readAllBytes(), "UTF-8");
                         for (String p : PATTERNS) {
-                            Matcher m = Pattern.compile(p).matcher(content);
+                            Matcher m = Pattern.compile(p).matcher(c);
                             while (m.find()) {
                                 urls.add(m.group());
                             }
@@ -39,14 +39,12 @@ public class URLDetector {
             }
         }
 
-        System.out.println("[URLDetector] Found " + urls.size() + " URLs:");
+        System.out.println("Found " + urls.size() + " URLs:");
         int i = 0;
         for (String url : urls) {
-            if (i++ > 20) {
-                System.out.println("... and " + (urls.size() - 20) + " more");
-                break;
-            }
+            if (i++ > 20) break;
             System.out.println("  " + url);
         }
+        if (urls.size() > 20) System.out.println("  ... and " + (urls.size() - 20) + " more");
     }
 }

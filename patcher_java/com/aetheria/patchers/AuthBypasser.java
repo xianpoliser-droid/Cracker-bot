@@ -56,6 +56,6 @@ public class AuthBypasser {
                 jos.closeEntry();
             }
         }
-        System.out.println("[AuthBypasser] Patched " + patched + " classes");
+        System.out.println("Bypassed " + patched + " classes");
     }
 }

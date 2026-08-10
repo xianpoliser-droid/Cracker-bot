@@ -1,6 +1,5 @@
 package license_injector;
 
-import org.objectweb.asm.*;
 import java.io.*;
 import java.util.*;
 import java.util.jar.*;
@@ -14,10 +13,9 @@ public class LicenseInjector {
 
         String input = args[0];
         String output = args[1];
-        String licenseKey = args[2];
+        String key = args[2];
 
-        System.out.println("[LicenseInjector] Input: " + input);
-        System.out.println("[LicenseInjector] Key: " + licenseKey);
+        System.out.println("License key: " + key);
 
         Map<String, byte[]> classes = new LinkedHashMap<>();
         String mainClass = null;
@@ -34,32 +32,29 @@ public class LicenseInjector {
             }
         }
 
-        // Find main class
-        for (Map.Entry<String, byte[]> e : classes.entrySet()) {
-            try {
-                String name = e.getKey();
-                byte[] data = e.getValue();
-                if (name.contains("Main") || name.contains("Client") || name.contains("Launcher")) {
-                    mainClass = name;
-                    break;
-                }
-            } catch (Exception ignored) {}
+        for (String name : classes.keySet()) {
+            if (name.contains("Main") || name.contains("Client") || name.contains("Launcher")) {
+                mainClass = name;
+                break;
+            }
         }
-
         if (mainClass == null && !classes.isEmpty()) {
             mainClass = classes.keySet().iterator().next();
         }
 
         if (mainClass == null) {
-            System.err.println("[LicenseInjector] No class found");
+            System.err.println("No class found");
             System.exit(1);
         }
 
-        System.out.println("[LicenseInjector] Main class: " + mainClass);
+        System.out.println("Main class: " + mainClass);
 
         byte[] data = classes.get(mainClass);
-        byte[] injected = injectLicense(data, licenseKey);
-        classes.put(mainClass, injected);
+        String content = new String(data, "UTF-8");
+        String check = "try { java.io.File f = new java.io.File(System.getProperty(\"user.home\"), \".license\"); if (!f.exists()) { System.out.println(\"LICENSE REQUIRED: " + key + "\"); System.exit(1); } String c = new String(java.nio.file.Files.readAllBytes(f.toPath())); if (!c.trim().equals(\"" + key + "\")) { System.out.println(\"INVALID LICENSE\"); System.exit(1); } } catch (Exception e) { System.out.println(\"LICENSE ERROR\"); System.exit(1); }";
+        content = content.replace("public static void main", "public static void __main");
+        content = content.replace("public class", "public static void main(String[] a) { " + check + " __main(a); } public class");
+        classes.put(mainClass, content.getBytes("UTF-8"));
 
         try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(output))) {
             for (Map.Entry<String, byte[]> e : classes.entrySet()) {
@@ -69,71 +64,6 @@ public class LicenseInjector {
             }
         }
 
-        System.out.println("[LicenseInjector] Done");
-    }
-
-    private static byte[] injectLicense(byte[] classData, String licenseKey) throws Exception {
-        ClassReader cr = new ClassReader(classData);
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
-        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] ex) {
-                MethodVisitor mv = super.visitMethod(access, name, desc, sig, ex);
-                if (name.equals("main") && desc.equals("([Ljava/lang/String;)V")) {
-                    return new MethodVisitor(Opcodes.ASM9, mv) {
-                        @Override
-                        public void visitCode() {
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", false);
-                            mv.visitLdcInsn("user.home");
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;", false);
-                            mv.visitLdcInsn("." + licenseKey.replace("-", "_") + "_license");
-                            mv.visitTypeInsn(Opcodes.NEW, "java/io/File");
-                            mv.visitInsn(Opcodes.DUP);
-                            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;Ljava/lang/String;)V", false);
-                            mv.visitVarInsn(Opcodes.ASTORE, 1);
-
-                            Label exists = new Label();
-                            mv.visitVarInsn(Opcodes.ALOAD, 1);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/File", "exists", "()Z", false);
-                            mv.visitJumpInsn(Opcodes.IFNE, exists);
-
-                            mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-                            mv.visitLdcInsn("LICENSE REQUIRED: " + licenseKey);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
-                            mv.visitInsn(Opcodes.ICONST_1);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
-
-                            mv.visitLabel(exists);
-                            mv.visitVarInsn(Opcodes.ALOAD, 1);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/nio/file/Files", "readAllBytes", "(Ljava/nio/file/Path;)[B", false);
-                            mv.visitTypeInsn(Opcodes.NEW, "java/lang/String");
-                            mv.visitInsn(Opcodes.DUP);
-                            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([B)V", false);
-                            mv.visitVarInsn(Opcodes.ASTORE, 2);
-
-                            Label valid = new Label();
-                            mv.visitVarInsn(Opcodes.ALOAD, 2);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "trim", "()Ljava/lang/String;", false);
-                            mv.visitLdcInsn(licenseKey);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
-                            mv.visitJumpInsn(Opcodes.IFNE, valid);
-
-                            mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-                            mv.visitLdcInsn("INVALID LICENSE");
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
-                            mv.visitInsn(Opcodes.ICONST_1);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
-
-                            mv.visitLabel(valid);
-                            super.visitCode();
-                        }
-                    };
-                }
-                return mv;
-            }
-        };
-        cr.accept(cv, 0);
-        return cw.toByteArray();
+        System.out.println("License injected");
     }
 }

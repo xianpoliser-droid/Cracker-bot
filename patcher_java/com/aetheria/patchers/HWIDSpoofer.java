@@ -18,7 +18,7 @@ public class HWIDSpoofer {
         String input = args[0];
         String output = args[1];
 
-        String fakeHwid = UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+        String fake = UUID.randomUUID().toString().replace("-", "").substring(0, 32);
 
         Map<String, byte[]> classes = new LinkedHashMap<>();
         try (JarFile jar = new JarFile(input)) {
@@ -40,7 +40,7 @@ public class HWIDSpoofer {
             boolean modified = false;
             for (String p : PATTERNS) {
                 if (content.contains(p)) {
-                    content = content.replace(p, "return \"" + fakeHwid + "\"");
+                    content = content.replace(p, "return \"" + fake + "\"");
                     modified = true;
                 }
             }
@@ -57,6 +57,6 @@ public class HWIDSpoofer {
                 jos.closeEntry();
             }
         }
-        System.out.println("[HWIDSpoofer] Patched " + patched + " classes");
+        System.out.println("Spoofed " + patched + " classes");
     }
 }
