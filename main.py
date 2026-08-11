@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Aetheria Cracker Bot — 2x Enhanced
-# Handles any obfuscation, outputs: Namefile.jar, Cleaned.jar, Licensed.jar, license.txt
+# Aetheria Cracker Bot — Production Real-Time
+# Handles 10MB+ clients, all obfuscation, real-time patching
 # 6767
 
 import os
@@ -19,8 +19,8 @@ import string
 import re
 import hashlib
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple, List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Tuple, List, Dict, Any
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = os.getenv("BOT_PREFIX", "!")
@@ -33,13 +33,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-MAX_FILE_SIZE = 50 * 1024 * 1024
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 JAVA_CLASSES = "/app/classes"
 ASM_JAR = "/app/asm-9.7.jar"
-TIMEOUT = 45
+TIMEOUT = 60
+THREADS = 4
 
-# ---------- UTILITIES ----------
-def big_text(text: str) -> str:
+def big_text(text):
     m = {
         'A': '𝗔', 'B': '𝗕', 'C': '𝗖', 'D': '𝗗', 'E': '𝗘',
         'F': '𝗙', 'G': '𝗚', 'H': '𝗛', 'I': '𝗜', 'J': '𝗝',
@@ -50,25 +50,25 @@ def big_text(text: str) -> str:
     }
     return ''.join(m.get(c, c) for c in text)
 
-def detect_version(filename: str) -> Optional[str]:
+def detect_version(filename):
     for p in [r'(\d+\.\d+\.\d+)', r'(\d+\.\d+)', r'(\d+\.\d+\.\d+\.\d+)']:
         m = re.search(p, filename)
         if m:
             return m.group(1)
     return None
 
-def generate_key() -> str:
+def generate_key():
     chars = string.ascii_uppercase + string.digits
     return "XIXI-" + '-'.join(''.join(random.choices(chars, k=4)) for _ in range(6))
 
-def file_hash(path: str) -> str:
+def file_hash(path):
     try:
         with open(path, 'rb') as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
     except:
         return "unknown"
 
-def run_java(klass: str, args: List[str]) -> Tuple[bool, str, str]:
+def run_java(klass, args):
     cmd = ["java", "-cp", f"{JAVA_CLASSES}:{ASM_JAR}", klass] + args
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
@@ -78,7 +78,7 @@ def run_java(klass: str, args: List[str]) -> Tuple[bool, str, str]:
     except Exception as e:
         return False, "", str(e)
 
-def patch_jar_fallback(input_path: str, output_path: str, patterns: List[str], replacement: str = "") -> Tuple[int, int]:
+def patch_jar_fallback(input_path, output_path, patterns, replacement=""):
     patched = 0
     total = 0
     with zipfile.ZipFile(input_path, 'r') as zf:
@@ -99,7 +99,7 @@ def patch_jar_fallback(input_path: str, output_path: str, patterns: List[str], r
                 out.writestr(name, data)
     return patched, total
 
-def change_version(input_path: str, output_path: str, new_version: str) -> bool:
+def change_version(input_path, output_path, new_version):
     modified = False
     with zipfile.ZipFile(input_path, 'r') as zf:
         with zipfile.ZipFile(output_path, 'w') as out:
@@ -132,7 +132,7 @@ def change_version(input_path: str, output_path: str, new_version: str) -> bool:
                 out.writestr(name, data)
     return modified
 
-def detect_urls(input_path: str) -> List[str]:
+def detect_urls(input_path):
     urls = []
     patterns = [r'https?://[^\s"\'<>]+', r'(?:www\.)[^\s"\'<>]+', r'[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s"\']*)?']
     with zipfile.ZipFile(input_path, 'r') as zf:
@@ -147,9 +147,8 @@ def detect_urls(input_path: str) -> List[str]:
                     continue
     return list(set(urls))
 
-# ---------- PROGRESS TRACKER ----------
 class Progress:
-    def __init__(self, ctx, title: str):
+    def __init__(self, ctx, title):
         self.ctx = ctx
         self.title = title
         self.msg = None
@@ -160,7 +159,7 @@ class Progress:
         self.msg = await self.ctx.send(f"⏳ {self.title} — 0%")
         return self.msg
 
-    async def update(self, step: str, progress: float):
+    async def update(self, step, progress):
         now = time.time()
         if now - self.last_update < 1.0 and progress < 100:
             return
@@ -170,11 +169,11 @@ class Progress:
         bar = '█' * int(progress / 5) + '░' * (20 - int(progress / 5))
         await self.msg.edit(content=f"⏳ **{self.title}**\n`{bar}` **{int(progress)}%**\n📌 {step}\n⏱️ ETA: {eta}s")
 
-    async def done(self, extra: str = ""):
+    async def done(self, extra=""):
         elapsed = int(time.time() - self.start)
         await self.msg.edit(content=f"✅ **{self.title}** — Done in {elapsed}s\n{extra}")
 
-    async def fail(self, error: str):
+    async def fail(self, error):
         await self.msg.edit(content=f"❌ **{self.title}** — Failed\n```\n{error}\n```")
 
 # ---------- COMMANDS ----------
@@ -203,9 +202,10 @@ async def crack_cmd(ctx, version: str = "1.21.1"):
         data = requests.get(url, timeout=10).json()
         client_url = data["downloads"]["client"]["url"]
         client_jar = os.path.join(tmp, "client.jar")
-        r = requests.get(client_url, timeout=30)
+        r = requests.get(client_url, timeout=30, stream=True)
         with open(client_jar, "wb") as f:
-            f.write(r.content)
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
         hash_id = file_hash(client_jar)
         await prog.update("Generating outputs", 50)
         namefile = os.path.join(tmp, "Namefile.jar")
@@ -229,14 +229,14 @@ async def crack_cmd(ctx, version: str = "1.21.1"):
 @bot.command(name='crackfile')
 async def crackfile_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("Upload a client JAR")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
         await ctx.send("Only .jar files")
         return
     if att.size > MAX_FILE_SIZE:
-        await ctx.send("File too large")
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
         return
     ver = detect_version(att.filename) or "unknown"
     prog = Progress(ctx, f"Cracking {att.filename}")
@@ -501,6 +501,6 @@ if __name__ == "__main__":
   ██║     ██╔══██╗██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
   ╚██████╗██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-   ─── Aetheria Cracker Bot — 2x Enhanced — 6767 ───
+   ─── Aetheria Cracker Bot — Production — 6767 ───
     """)
     bot.run(TOKEN)
