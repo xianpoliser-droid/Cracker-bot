@@ -1,5 +1,7 @@
 package com.aetheria.patchers;
 
+import org.objectweb.asm.*;
+import org.objectweb.asm.tree.*;
 import java.io.*;
 import java.util.*;
 import java.util.jar.*;
@@ -34,19 +36,29 @@ public class AuthBypasser {
 
         int patched = 0;
         for (Map.Entry<String, byte[]> e : classes.entrySet()) {
-            byte[] data = e.getValue();
-            String content = new String(data, "UTF-8");
-            boolean modified = false;
-            for (String p : PATTERNS) {
-                if (content.contains(p)) {
-                    content = content.replace(p, "true");
-                    modified = true;
+            ClassReader cr = new ClassReader(e.getValue());
+            ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+            ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] ex) {
+                    return new MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, desc, sig, ex)) {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
+                            for (String p : PATTERNS) {
+                                if (name.contains(p) || owner.contains(p)) {
+                                    super.visitInsn(Opcodes.ICONST_1);
+                                    super.visitInsn(Opcodes.IRETURN);
+                                    return;
+                                }
+                            }
+                            super.visitMethodInsn(opcode, owner, name, desc, itf);
+                        }
+                    };
                 }
-            }
-            if (modified) {
-                classes.put(e.getKey(), content.getBytes("UTF-8"));
-                patched++;
-            }
+            };
+            cr.accept(cv, 0);
+            classes.put(e.getKey(), cw.toByteArray());
+            patched++;
         }
 
         try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(output))) {
