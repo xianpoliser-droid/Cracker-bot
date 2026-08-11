@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Aetheria Cracker Bot — All Python, no Java dependency (except injectlicense)
-# All commands: crack, crackfile, generate, removelicense, spoofhwid, bypassauth, detectweb, injectlicense, changeversion
+# Aetheria Cracker Bot — Full Production
+# 10 commands, injectlicense with Java ASM + fallback
 # 6767
 
 import os
@@ -33,8 +33,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
-JAVA_CLASSES = "/app/classes"
-ASM_JAR = "/app/asm-9.7.jar"
 
 # ---------- UTILITIES ----------
 def big_text(text: str) -> str:
@@ -66,7 +64,7 @@ def file_hash(path: str) -> str:
     except:
         return "unknown"
 
-# ---------- PYTHON PATCHERS (all working, no Java) ----------
+# ---------- PYTHON PATCHERS ----------
 def patch_jar_python(input_path: str, output_path: str, patterns: List[str], replacement: str = "") -> Tuple[int, int]:
     patched = 0
     total = 0
@@ -137,12 +135,9 @@ def detect_urls_python(input_path: str) -> List[str]:
     return list(set(urls))
 
 def inject_license_python(input_path: str, output_path: str, license_key: str) -> bool:
-    # Simple fallback: copy and add license file inside
     shutil.copy(input_path, output_path)
-    # Add license file to JAR
-    license_content = f"LICENSE_KEY={license_key}\nGENERATED={time.ctime()}\n"
     with zipfile.ZipFile(output_path, 'a') as zf:
-        zf.writestr("license.txt", license_content)
+        zf.writestr("license.txt", f"LICENSE_KEY={license_key}\nGENERATED={time.ctime()}\n")
     return True
 
 # ---------- COMMANDS ----------
@@ -180,7 +175,6 @@ async def crack_cmd(ctx, version: str = "1.21.1"):
         key = generate_key()
         licensed = os.path.join(tmp, "Licensed.jar")
         shutil.copy(namefile, licensed)
-        # Add license file to Licensed.jar
         with zipfile.ZipFile(licensed, 'a') as zf:
             zf.writestr("license.txt", f"LICENSE_KEY={key}\nGENERATED={time.ctime()}\n")
         await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
@@ -211,7 +205,6 @@ async def crackfile_cmd(ctx):
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
     try:
-        # Namefile with X
         namefile = os.path.join(tmp, namefile_name)
         shutil.copy(jar_path, namefile)
         cleaned = os.path.join(tmp, "Cleaned.jar")
@@ -375,32 +368,32 @@ async def detectweb_cmd(ctx):
 @bot.command(name='injectlicense')
 async def injectlicense_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("📎 Upload a JAR")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
-        await ctx.send("Only .jar files")
+        await ctx.send("❌ Only .jar files")
         return
-    await ctx.send(f"Injecting license into {att.filename}...")
+    await ctx.send(f"🔧 Injecting license into {att.filename}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
     try:
         key = generate_key()
         out = os.path.join(tmp, "injected.jar")
-        # Try Java injector if available, else Python fallback
-        ok = False
-        if os.path.exists(JAVA_CLASSES) and os.path.exists(ASM_JAR):
-            cmd = ["java", "-cp", f"{JAVA_CLASSES}:{ASM_JAR}", "license_injector.LicenseInjector", jar_path, out, key]
-            try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    ok = True
-            except:
-                pass
-        if not ok:
-            # Python fallback
+        injector = os.path.join(os.path.dirname(__file__), "LicenseInjector.jar")
+        asm = os.path.join(os.path.dirname(__file__), "asm-9.7.jar")
+        if os.path.exists(injector) and os.path.exists(asm):
+            cmd = ["java", "-cp", f"{injector}:{asm}", "LicenseInjector", jar_path, out, key]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                inject_license_python(jar_path, out, key)
+                await ctx.send("⚠️ Java injector failed, used fallback (license file).")
+            else:
+                await ctx.send("✅ License injected via Java ASM.")
+        else:
             inject_license_python(jar_path, out, key)
+            await ctx.send("⚠️ Java injector not found, used fallback (license file).")
         await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
         await ctx.send(file=discord.File(out, f"injected_{att.filename}"))
         await ctx.send(f"🔑 Key: `{key}`")
@@ -467,6 +460,6 @@ if __name__ == "__main__":
   ██║     ██╔══██╗██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
   ╚██████╗██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-   ─── Aetheria Cracker Bot — Python-Native — 6767 ───
+   ─── Aetheria Cracker Bot — Full — 6767 ───
     """)
     bot.run(TOKEN)
