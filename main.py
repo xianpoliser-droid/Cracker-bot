@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Aetheria Cracker Bot — Full Production
-# 10 commands, injectlicense with Java ASM + fallback
+# Cracker Bot — Full Production
+# 9 commands: CrackClient, generate, removelicensehwid, malwarecheck, checkdirectory, changeversion, patchpanel, decompile, info
 # 6767
 
 import os
@@ -19,20 +19,23 @@ import string
 import re
 import hashlib
 from datetime import datetime
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-PREFIX = os.getenv("BOT_PREFIX", "!")
+PREFIX = os.getenv("BOT_PREFIX", "?")
 WEBHOOK = os.getenv("WEBHOOK_URL")
 
 if not TOKEN or not WEBHOOK:
-    raise ValueError("Missing DISCORD_TOKEN or WEBHOOK_URL")
+    raise ValueError("Missing environment variables")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
+executor = ThreadPoolExecutor(max_workers=4)
 
 # ---------- UTILITIES ----------
 def big_text(text: str) -> str:
@@ -55,7 +58,7 @@ def detect_version(filename: str) -> Optional[str]:
 
 def generate_key() -> str:
     chars = string.ascii_uppercase + string.digits
-    return "XIXI-" + '-'.join(''.join(random.choices(chars, k=4)) for _ in range(6))
+    return '-'.join(''.join(random.choices(chars, k=4)) for _ in range(4))
 
 def file_hash(path: str) -> str:
     try:
@@ -64,8 +67,7 @@ def file_hash(path: str) -> str:
     except:
         return "unknown"
 
-# ---------- PYTHON PATCHERS ----------
-def patch_jar_python(input_path: str, output_path: str, patterns: List[str], replacement: str = "") -> Tuple[int, int]:
+def patch_jar(input_path: str, output_path: str, patterns: List[str], replacement: str = "") -> Tuple[int, int]:
     patched = 0
     total = 0
     with zipfile.ZipFile(input_path, 'r') as zf:
@@ -86,7 +88,7 @@ def patch_jar_python(input_path: str, output_path: str, patterns: List[str], rep
                 out.writestr(name, data)
     return patched, total
 
-def change_version_python(input_path: str, output_path: str, new_version: str) -> bool:
+def change_version(input_path: str, output_path: str, new_version: str) -> bool:
     modified = False
     with zipfile.ZipFile(input_path, 'r') as zf:
         with zipfile.ZipFile(output_path, 'w') as out:
@@ -119,77 +121,140 @@ def change_version_python(input_path: str, output_path: str, new_version: str) -
                 out.writestr(name, data)
     return modified
 
-def detect_urls_python(input_path: str) -> List[str]:
-    urls = []
-    patterns = [r'https?://[^\s"\'<>]+', r'(?:www\.)[^\s"\'<>]+', r'[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s"\']*)?']
-    with zipfile.ZipFile(input_path, 'r') as zf:
+def extract_source(input_path: str, output_path: str) -> bool:
+    try:
+        with zipfile.ZipFile(input_path, 'r') as zf:
+            with zipfile.ZipFile(output_path, 'w') as out:
+                for name in zf.namelist():
+                    if name.endswith('.java'):
+                        out.writestr(name, zf.read(name))
+        return True
+    except:
+        return False
+
+def decompile_full(input_jar: str, output_dir: str) -> bool:
+    cfr_path = "/tmp/cfr.jar"
+    if not os.path.exists(cfr_path):
+        try:
+            r = requests.get("https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar", timeout=30)
+            with open(cfr_path, 'wb') as f:
+                f.write(r.content)
+        except:
+            return False
+
+    cmd = ["java", "-jar", cfr_path, input_jar, "--outputdir", output_dir, "--silent", "true"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        return True
+    except:
+        return False
+
+# ---------- MALWARE PATTERNS ----------
+MALWARE_PATTERNS = {
+    "discord_webhook": r'https?://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+',
+    "token": r'[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27,38}',
+    "ip_logger": r'(?:\d{1,3}\.){3}\d{1,3}:[0-9]{1,5}|http[s]?://(?:[\w-]+\.)+[\w-]+/[\w./?%&=]*(?:log|logger|ip)',
+    "telegram_bot": r'https?://api\.telegram\.org/bot\d+:[A-Za-z0-9_-]+',
+    "system_calls": r'(Runtime\.exec|ProcessBuilder|getRuntime\(\)\.exec)',
+    "reflection": r'(\.getDeclaredMethod|\.setAccessible|\.invoke)',
+    "file_operations": r'(Files\.write|FileOutputStream|FileWriter|RandomAccessFile)',
+    "network": r'(Socket|URL|HttpURLConnection|URLConnection|DatagramSocket)',
+    "rat": r'(RAT|Remote Access Trojan|backdoor|shellcode)',
+    "beacon": r'(C2|command.control|callback|beacon)',
+}
+
+def scan_malware(jar_path: str) -> Dict[str, List[str]]:
+    results = {}
+    for category in MALWARE_PATTERNS:
+        results[category] = []
+    with zipfile.ZipFile(jar_path, 'r') as zf:
         for name in zf.namelist():
             if name.endswith('.class') or name.endswith('.json') or name.endswith('.properties'):
                 try:
-                    c = zf.read(name).decode('utf-8', errors='ignore')
-                    for p in patterns:
-                        for m in re.finditer(p, c):
-                            urls.append(m.group())
+                    content = zf.read(name).decode('utf-8', errors='ignore')
+                    for category, pattern in MALWARE_PATTERNS.items():
+                        for match in re.finditer(pattern, content, re.IGNORECASE):
+                            results[category].append(f"{name} → {match.group()}")
                 except:
                     continue
-    return list(set(urls))
+    return results
 
-def inject_license_python(input_path: str, output_path: str, license_key: str) -> bool:
+def get_directory_structure(jar_path: str) -> str:
+    structure = []
+    with zipfile.ZipFile(jar_path, 'r') as zf:
+        for name in sorted(zf.namelist()):
+            structure.append(name)
+    return "\n".join(structure[:50]) + ("\n... and more" if len(structure) > 50 else "")
+
+def inject_license_key(input_path: str, output_path: str, license_key: str) -> bool:
     shutil.copy(input_path, output_path)
     with zipfile.ZipFile(output_path, 'a') as zf:
         zf.writestr("license.txt", f"LICENSE_KEY={license_key}\nGENERATED={time.ctime()}\n")
     return True
 
-# ---------- COMMANDS ----------
-@bot.command(name='crack')
-async def crack_cmd(ctx, version: str = "1.21.1"):
-    await ctx.send(f"Cracking {version}...")
-    tmp = tempfile.mkdtemp()
+def find_main_class(jar_path: str) -> Optional[str]:
     try:
-        manifest = requests.get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json", timeout=10).json()
-        url = None
-        for v in manifest["versions"]:
-            if v["id"] == version:
-                url = v["url"]
-                break
-        if not url:
-            for v in manifest["versions"]:
-                if version in v["id"]:
-                    url = v["url"]
-                    version = v["id"]
-                    break
-            if not url:
-                raise Exception(f"Version {version} not found")
-        data = requests.get(url, timeout=10).json()
-        client_url = data["downloads"]["client"]["url"]
-        client_jar = os.path.join(tmp, "client.jar")
-        r = requests.get(client_url, stream=True, timeout=30)
-        with open(client_jar, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-        hash_id = file_hash(client_jar)
-        namefile = os.path.join(tmp, "Namefile.jar")
-        shutil.copy(client_jar, namefile)
-        cleaned = os.path.join(tmp, "Cleaned.jar")
-        shutil.copy(namefile, cleaned)
-        key = generate_key()
-        licensed = os.path.join(tmp, "Licensed.jar")
-        shutil.copy(namefile, licensed)
-        with zipfile.ZipFile(licensed, 'a') as zf:
-            zf.writestr("license.txt", f"LICENSE_KEY={key}\nGENERATED={time.ctime()}\n")
-        await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
-        await ctx.send(file=discord.File(namefile, "Namefile.jar"))
-        await ctx.send(file=discord.File(cleaned, "Cleaned.jar"))
-        await ctx.send(file=discord.File(licensed, "Licensed.jar"))
-        shutil.rmtree(tmp)
-    except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
-        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(jar_path, 'r') as zf:
+            for name in zf.namelist():
+                if name.endswith('.class') and ('Main' in name or 'Client' in name or 'Launcher' in name):
+                    return name
+    except:
+        pass
+    return None
 
-@bot.command(name='crackfile')
-async def crackfile_cmd(ctx):
+def patch_source_files(src_dir: str, old_url: str, new_url: str) -> int:
+    patched = 0
+    for root, dirs, files in os.walk(src_dir):
+        for file in files:
+            if file.endswith('.java'):
+                path = os.path.join(root, file)
+                try:
+                    with open(path, 'r', errors='ignore') as f:
+                        content = f.read()
+                    if old_url in content or old_url.replace('https://', '').replace('http://', '') in content:
+                        content = content.replace(old_url, new_url)
+                        content = content.replace(old_url.replace('https://', ''), new_url.replace('http://', ''))
+                        with open(path, 'w') as f:
+                            f.write(content)
+                        patched += 1
+                except:
+                    continue
+    return patched
+
+def recompile_source(src_dir: str, output_jar: str) -> bool:
+    java_files = []
+    for root, dirs, files in os.walk(src_dir):
+        for file in files:
+            if file.endswith('.java'):
+                java_files.append(os.path.join(root, file))
+
+    if not java_files:
+        return False
+
+    class_dir = os.path.join(src_dir, "classes")
+    os.makedirs(class_dir, exist_ok=True)
+
+    cmd = ["javac", "-d", class_dir, "-cp", "."] + java_files
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    except:
+        return False
+
+    with zipfile.ZipFile(output_jar, 'w') as zf:
+        for root, dirs, files in os.walk(class_dir):
+            for file in files:
+                path = os.path.join(root, file)
+                arcname = os.path.relpath(path, class_dir)
+                zf.write(path, arcname)
+
+    return True
+
+# ---------- COMMANDS ----------
+
+@bot.command(name='CrackClient')
+async def crackclient_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a client JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
@@ -198,254 +263,436 @@ async def crackfile_cmd(ctx):
     if att.size > MAX_FILE_SIZE:
         await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
         return
+
     base, ext = os.path.splitext(att.filename)
-    namefile_name = f"{base}X.jar"
-    await ctx.send(f"Cracking {att.filename} → {namefile_name}...")
+    await ctx.send(f"Cracking {att.filename}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
+
     try:
-        namefile = os.path.join(tmp, namefile_name)
+        patterns = [
+            "checkLicense","verifyLicense","isLicensed","hasLicense",
+            "validate","isValid","authenticate","isAuthenticated",
+            "licenseKey","getLicense","verifyKey","checkKey",
+            "isPremium","hasPremium","checkPremium","premium",
+            "isCracked","hasCrack","checkCrack","cracked",
+            "HWID","getHWID","getHardwareID","hardwareId",
+            "deviceId","machineId","fingerprint","serial"
+        ]
+        namefile = os.path.join(tmp, f"{base}.jar")
         shutil.copy(jar_path, namefile)
-        cleaned = os.path.join(tmp, "Cleaned.jar")
-        shutil.copy(namefile, cleaned)
-        key = generate_key()
-        licensed = os.path.join(tmp, "Licensed.jar")
-        shutil.copy(namefile, licensed)
-        with zipfile.ZipFile(licensed, 'a') as zf:
-            zf.writestr("license.txt", f"LICENSE_KEY={key}\nGENERATED={time.ctime()}\n")
+
+        cracked = os.path.join(tmp, f"{base}X.jar")
+        patch_jar(jar_path, cracked, patterns, "")
+
+        source_zip = os.path.join(tmp, f"{base}.zip")
+        extract_source(jar_path, source_zip)
+
         await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
-        await ctx.send(file=discord.File(namefile, namefile_name))
-        await ctx.send(file=discord.File(cleaned, "Cleaned.jar"))
-        await ctx.send(file=discord.File(licensed, "Licensed.jar"))
+        await ctx.send(file=discord.File(namefile, f"{base}.jar"))
+        await ctx.send(file=discord.File(cracked, f"{base}X.jar"))
+        await ctx.send(file=discord.File(source_zip, f"{base}.zip"))
+
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
 @bot.command(name='generate')
 async def generate_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
         await ctx.send("Only .jar files")
         return
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
     base, ext = os.path.splitext(att.filename)
-    namefile_name = f"{base}X.jar"
-    await ctx.send(f"Generating license for {att.filename} → {namefile_name}...")
+    await ctx.send(f"Generating license for {att.filename}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
+
     try:
-        namefile = os.path.join(tmp, namefile_name)
-        shutil.copy(jar_path, namefile)
-        cleaned = os.path.join(tmp, "Cleaned.jar")
-        shutil.copy(namefile, cleaned)
         key = generate_key()
-        licensed = os.path.join(tmp, "Licensed.jar")
-        shutil.copy(namefile, licensed)
-        with zipfile.ZipFile(licensed, 'a') as zf:
-            zf.writestr("license.txt", f"LICENSE_KEY={key}\nGENERATED={time.ctime()}\n")
+        licensed = os.path.join(tmp, f"{base}L.jar")
+        inject_license_key(jar_path, licensed, key)
+
         await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
-        await ctx.send(file=discord.File(namefile, namefile_name))
-        await ctx.send(file=discord.File(cleaned, "Cleaned.jar"))
-        await ctx.send(file=discord.File(licensed, "Licensed.jar"))
+        await ctx.send(file=discord.File(licensed, f"{base}L.jar"))
+        await ctx.send(f"||License Key: `{key}`||")
+
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
-@bot.command(name='removelicense')
-async def removelicense_cmd(ctx):
+@bot.command(name='removelicensehwid')
+async def removelicensehwid_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
         await ctx.send("Only .jar files")
         return
-    await ctx.send(f"Removing license checks from {att.filename}...")
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    base, ext = os.path.splitext(att.filename)
+    await ctx.send(f"Removing license/HWID from {att.filename}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
+
     try:
-        out = os.path.join(tmp, "nolicense.jar")
-        patterns = ["checkLicense","verifyLicense","isLicensed","hasLicense","validate","isValid","authenticate"]
-        patched, total = patch_jar_python(jar_path, out, patterns, "")
-        await ctx.send(file=discord.File(out, f"nolicense_{att.filename}"))
-        await ctx.send(f"✅ Patched {patched}/{total} classes")
+        patterns = [
+            "checkLicense","verifyLicense","isLicensed","hasLicense",
+            "validate","isValid","authenticate","isAuthenticated",
+            "licenseKey","getLicense","verifyKey","checkKey",
+            "isPremium","hasPremium","checkPremium","premium",
+            "isCracked","hasCrack","checkCrack","cracked",
+            "HWID","getHWID","getHardwareID","hardwareId",
+            "deviceId","machineId","fingerprint","serial"
+        ]
+        out = os.path.join(tmp, f"{base}_clean.jar")
+        patch_jar(jar_path, out, patterns, "")
+
+        await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
+        await ctx.send(file=discord.File(out, f"{base}_clean.jar"))
+
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
-@bot.command(name='spoofhwid')
-async def spoofhwid_cmd(ctx):
+@bot.command(name='malwarecheck')
+async def malwarecheck_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
         await ctx.send("Only .jar files")
         return
-    await ctx.send(f"Spoofing HWID in {att.filename}...")
-    tmp = tempfile.mkdtemp()
-    jar_path = os.path.join(tmp, att.filename)
-    await att.save(jar_path)
-    try:
-        out = os.path.join(tmp, "spoofed.jar")
-        fake = ''.join(random.choices(string.hexdigits.upper(), k=32))
-        patterns = ["getHWID","getHardwareID","hardwareId"]
-        patched, total = patch_jar_python(jar_path, out, patterns, f"return \"{fake}\"")
-        await ctx.send(file=discord.File(out, f"spoofed_{att.filename}"))
-        await ctx.send(f"✅ HWID spoofed ({patched}/{total} classes)")
-        shutil.rmtree(tmp)
-    except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
-        shutil.rmtree(tmp, ignore_errors=True)
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
 
-@bot.command(name='bypassauth')
-async def bypassauth_cmd(ctx):
-    if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
-        return
-    att = ctx.message.attachments[0]
-    if not att.filename.endswith('.jar'):
-        await ctx.send("Only .jar files")
-        return
-    await ctx.send(f"Bypassing auth in {att.filename}...")
+    await ctx.send(f"Scanning {att.filename} for malware...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
-    try:
-        out = os.path.join(tmp, "bypass.jar")
-        patterns = ["checkAuth","isAuthenticated","authenticate"]
-        patched, total = patch_jar_python(jar_path, out, patterns, "true")
-        await ctx.send(file=discord.File(out, f"bypass_{att.filename}"))
-        await ctx.send(f"✅ Auth bypassed ({patched}/{total} classes)")
-        shutil.rmtree(tmp)
-    except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
-        shutil.rmtree(tmp, ignore_errors=True)
 
-@bot.command(name='detectweb')
-async def detectweb_cmd(ctx):
-    if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
-        return
-    att = ctx.message.attachments[0]
-    if not att.filename.endswith('.jar'):
-        await ctx.send("Only .jar files")
-        return
-    await ctx.send(f"Scanning {att.filename} for URLs...")
-    tmp = tempfile.mkdtemp()
-    jar_path = os.path.join(tmp, att.filename)
-    await att.save(jar_path)
     try:
-        urls = detect_urls_python(jar_path)
-        if not urls:
-            await ctx.send("No URLs found.")
-            shutil.rmtree(tmp)
-            return
-        results = []
-        for url in urls[:15]:
-            try:
-                r = requests.get(url, timeout=3)
-                results.append(f"{'✅' if r.status_code < 400 else '⚠️'} {r.status_code} {url}")
-            except:
-                results.append(f"❌ unreachable {url}")
-        report = f"**URLs ({len(urls)})**\n" + "\n".join(results[:10])
-        if len(urls) > 10:
-            report += f"\n... and {len(urls)-10} more"
+        results = scan_malware(jar_path)
+        found = False
+        report = f"**Malware Scan Report for {att.filename}**\n"
+        for category, matches in results.items():
+            if matches:
+                found = True
+                report += f"\n**{category.upper()} DETECTED:**\n"
+                for m in matches[:5]:
+                    report += f"  {m}\n"
+                if len(matches) > 5:
+                    report += f"  ... and {len(matches)-5} more\n"
+
+        if not found:
+            report += "\n✅ No malware detected."
+
         await ctx.send(report)
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
-@bot.command(name='injectlicense')
-async def injectlicense_cmd(ctx):
+@bot.command(name='checkdirectory')
+async def checkdirectory_cmd(ctx):
     if not ctx.message.attachments:
-        await ctx.send("📎 Upload a JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
-        await ctx.send("❌ Only .jar files")
+        await ctx.send("Only .jar files")
         return
-    await ctx.send(f"🔧 Injecting license into {att.filename}...")
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    await ctx.send(f"Getting directory structure of {att.filename}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
+
     try:
-        key = generate_key()
-        out = os.path.join(tmp, "injected.jar")
-        injector = os.path.join(os.path.dirname(__file__), "LicenseInjector.jar")
-        asm = os.path.join(os.path.dirname(__file__), "asm-9.7.jar")
-        if os.path.exists(injector) and os.path.exists(asm):
-            cmd = ["java", "-cp", f"{injector}:{asm}", "LicenseInjector", jar_path, out, key]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                inject_license_python(jar_path, out, key)
-                await ctx.send("⚠️ Java injector failed, used fallback (license file).")
-            else:
-                await ctx.send("✅ License injected via Java ASM.")
+        structure = get_directory_structure(jar_path)
+        if len(structure) > 1900:
+            chunks = [structure[i:i+1900] for i in range(0, len(structure), 1900)]
+            for chunk in chunks:
+                await ctx.send(f"```\n{chunk}\n```")
         else:
-            inject_license_python(jar_path, out, key)
-            await ctx.send("⚠️ Java injector not found, used fallback (license file).")
-        await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
-        await ctx.send(file=discord.File(out, f"injected_{att.filename}"))
-        await ctx.send(f"🔑 Key: `{key}`")
+            await ctx.send(f"```\n{structure}\n```")
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
 @bot.command(name='changeversion')
 async def changeversion_cmd(ctx, version: str):
     if not ctx.message.attachments:
-        await ctx.send("Upload a JAR")
+        await ctx.send("Upload a client JAR with the command")
         return
     att = ctx.message.attachments[0]
     if not att.filename.endswith('.jar'):
         await ctx.send("Only .jar files")
         return
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    base, ext = os.path.splitext(att.filename)
     await ctx.send(f"Changing version to {version}...")
     tmp = tempfile.mkdtemp()
     jar_path = os.path.join(tmp, att.filename)
     await att.save(jar_path)
+
     try:
-        out = os.path.join(tmp, f"version_{version}.jar")
-        ok = change_version_python(jar_path, out, version)
+        out = os.path.join(tmp, f"{base}_{version}.jar")
+        change_version(jar_path, out, version)
         await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
-        await ctx.send(file=discord.File(out, f"version_{version}_{att.filename}"))
-        await ctx.send(f"✅ Version changed to `{version}`")
+        await ctx.send(file=discord.File(out, f"{base}_{version}.jar"))
         shutil.rmtree(tmp)
     except Exception as e:
-        await ctx.send(f"❌ Failed: {e}")
+        await ctx.send(f"Failed: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+@bot.command(name='patchpanel')
+async def patchpanel_cmd(ctx, panel_url: str = None):
+    if not ctx.message.attachments:
+        await ctx.send("Upload a client JAR with the command")
+        return
+    if not panel_url:
+        await ctx.send("Specify the panel URL to replace (e.g., ?patchpanel https://ownerpanel.com)")
+        return
+
+    att = ctx.message.attachments[0]
+    if not att.filename.endswith('.jar'):
+        await ctx.send("Only .jar files")
+        return
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    base, ext = os.path.splitext(att.filename)
+    await ctx.send(f"Patching panel URL in {att.filename}...\nDecompiling, replacing URL, recompiling... (may take 2-5 min)")
+
+    tmp = tempfile.mkdtemp()
+    jar_path = os.path.join(tmp, att.filename)
+    await att.save(jar_path)
+
+    try:
+        src_dir = os.path.join(tmp, "src")
+        os.makedirs(src_dir, exist_ok=True)
+        await ctx.send("Step 1/3: Decompiling...")
+        if not decompile_full(jar_path, src_dir):
+            await ctx.send("Decompilation failed.")
+            shutil.rmtree(tmp)
+            return
+
+        await ctx.send("Step 2/3: Replacing panel URL...")
+        new_url = "http://127.0.0.1/license"
+        patched = patch_source_files(src_dir, panel_url, new_url)
+        if patched == 0:
+            patterns = ["checkLicense","verifyLicense","isLicensed","hasLicense","authenticate","isAuthenticated","validate","isValid"]
+            for root, dirs, files in os.walk(src_dir):
+                for file in files:
+                    if file.endswith('.java'):
+                        path = os.path.join(root, file)
+                        try:
+                            with open(path, 'r', errors='ignore') as f:
+                                content = f.read()
+                            modified = False
+                            for p in patterns:
+                                if p in content:
+                                    content = content.replace(p, "true")
+                                    modified = True
+                            if modified:
+                                with open(path, 'w') as f:
+                                    f.write(content)
+                                patched += 1
+                        except:
+                            continue
+
+        await ctx.send(f"Patched {patched} files.")
+
+        await ctx.send("Step 3/3: Recompiling...")
+        output_jar = os.path.join(tmp, f"{base}_patched.jar")
+        if not recompile_source(src_dir, output_jar):
+            await ctx.send("Recompilation failed.")
+            shutil.rmtree(tmp)
+            return
+
+        await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
+        await ctx.send(file=discord.File(output_jar, f"{base}_patched.jar"))
+        await ctx.send(f"✅ Panel URL replaced: `{panel_url}` → `{new_url}`")
+
+        shutil.rmtree(tmp)
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+# ---------- NEW COMMANDS: decompile + info ----------
+
+@bot.command(name='decompile')
+async def decompile_cmd(ctx):
+    """?decompile <attachment> — Extract full source code from JAR"""
+    if not ctx.message.attachments:
+        await ctx.send("Upload a client JAR with the command")
+        return
+    att = ctx.message.attachments[0]
+    if not att.filename.endswith('.jar'):
+        await ctx.send("Only .jar files")
+        return
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    await ctx.send(f"Decompiling {att.filename}... (this may take 2-5 min)")
+
+    tmp = tempfile.mkdtemp()
+    jar_path = os.path.join(tmp, att.filename)
+    await att.save(jar_path)
+
+    try:
+        src_dir = os.path.join(tmp, "src")
+        os.makedirs(src_dir, exist_ok=True)
+
+        if not decompile_full(jar_path, src_dir):
+            await ctx.send("Decompilation failed. The client may be heavily obfuscated.")
+            shutil.rmtree(tmp)
+            return
+
+        # Create zip of all source files
+        base, ext = os.path.splitext(att.filename)
+        source_zip = os.path.join(tmp, f"{base}_source.zip")
+        with zipfile.ZipFile(source_zip, 'w') as zf:
+            for root, dirs, files in os.walk(src_dir):
+                for file in files:
+                    path = os.path.join(root, file)
+                    arcname = os.path.relpath(path, src_dir)
+                    zf.write(path, arcname)
+
+        await ctx.send("**" + big_text("CRACKED BY XIXI") + "**")
+        await ctx.send(file=discord.File(source_zip, f"{base}_source.zip"))
+        await ctx.send(f"✅ Full source extracted. {len(os.listdir(src_dir))} files.")
+
+        shutil.rmtree(tmp)
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
 
 @bot.command(name='info')
 async def info_cmd(ctx):
-    e = discord.Embed(title="Aetheria Cracker Bot", color=0x00FF00)
-    e.add_field(name="Commands", value="10", inline=True)
-    e.add_field(name="Servers", value=str(len(bot.guilds)), inline=True)
-    e.add_field(name="Uptime", value=str(datetime.now() - bot.start_time).split('.')[0], inline=True)
-    e.set_footer(text="6767 — Onyx v67")
-    await ctx.send(embed=e)
+    """?info <attachment> — Deep client analysis"""
+    if not ctx.message.attachments:
+        await ctx.send("Upload a client JAR with the command")
+        return
+    att = ctx.message.attachments[0]
+    if not att.filename.endswith('.jar'):
+        await ctx.send("Only .jar files")
+        return
+    if att.size > MAX_FILE_SIZE:
+        await ctx.send(f"File too large (max {MAX_FILE_SIZE//(1024*1024)}MB)")
+        return
+
+    await ctx.send(f"Analyzing {att.filename}...")
+
+    tmp = tempfile.mkdtemp()
+    jar_path = os.path.join(tmp, att.filename)
+    await att.save(jar_path)
+
+    try:
+        info = {
+            "name": att.filename,
+            "size": f"{att.size // 1024} KB",
+            "version": detect_version(att.filename) or "unknown",
+            "main_class": find_main_class(jar_path) or "not found",
+            "files": 0,
+            "classes": 0,
+            "urls": [],
+            "panel_domains": [],
+            "suspicious": []
+        }
+
+        with zipfile.ZipFile(jar_path, 'r') as zf:
+            info["files"] = len(zf.namelist())
+            for name in zf.namelist():
+                if name.endswith('.class'):
+                    info["classes"] += 1
+                if name.endswith('.class') or name.endswith('.json') or name.endswith('.properties'):
+                    try:
+                        content = zf.read(name).decode('utf-8', errors='ignore')
+                        # Find URLs
+                        urls = re.findall(r'https?://[^\s"\'<>]+', content)
+                        for url in urls:
+                            if url not in info["urls"]:
+                                info["urls"].append(url)
+                                if "panel" in url or "license" in url or "auth" in url or "api" in url:
+                                    info["panel_domains"].append(url)
+                        # Suspicious methods
+                        suspicious_methods = [
+                            "Runtime.exec", "ProcessBuilder", "getDeclaredMethod",
+                            "setAccessible", "invoke", "webhook", "discord.com",
+                            "telegram", "bot", "logger", "rat", "backdoor"
+                        ]
+                        for sm in suspicious_methods:
+                            if sm in content:
+                                if sm not in info["suspicious"]:
+                                    info["suspicious"].append(sm)
+                    except:
+                        continue
+
+        embed = discord.Embed(title=f"Client Analysis: {info['name']}", color=0x00AAFF)
+        embed.add_field(name="Version", value=info["version"], inline=True)
+        embed.add_field(name="Size", value=info["size"], inline=True)
+        embed.add_field(name="Main Class", value=info["main_class"], inline=True)
+        embed.add_field(name="Total Files", value=str(info["files"]), inline=True)
+        embed.add_field(name="Classes", value=str(info["classes"]), inline=True)
+        embed.add_field(name="URLs Found", value=str(len(info["urls"])), inline=True)
+
+        if info["panel_domains"]:
+            embed.add_field(name="Panel/License Domains", value="\n".join(info["panel_domains"][:5]), inline=False)
+        if info["suspicious"]:
+            embed.add_field(name="Suspicious Methods", value=", ".join(info["suspicious"][:10]), inline=False)
+
+        embed.set_footer(text="6767 — Onyx v67")
+        await ctx.send(embed=embed)
+
+        shutil.rmtree(tmp)
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
 
 @bot.command(name='help')
 async def help_cmd(ctx):
-    e = discord.Embed(title="Commands", color=0xFF5500)
-    e.add_field(name="Core", value="!crack <ver>\n!crackfile\n!generate", inline=False)
-    e.add_field(name="Patch", value="!removelicense\n!spoofhwid\n!bypassauth", inline=False)
-    e.add_field(name="Analyze", value="!detectweb\n!injectlicense\n!changeversion <ver>", inline=False)
-    e.add_field(name="Other", value="!info\n!help", inline=False)
+    e = discord.Embed(title="Cracker Bot — 9 Commands", color=0xFF5500)
+    e.add_field(name="?CrackClient", value="Crack client → 3 files", inline=False)
+    e.add_field(name="?generate", value="Generate license key", inline=False)
+    e.add_field(name="?removelicensehwid", value="Remove license/HWID checks", inline=False)
+    e.add_field(name="?malwarecheck", value="Scan for malware", inline=False)
+    e.add_field(name="?checkdirectory", value="Show directory structure", inline=False)
+    e.add_field(name="?changeversion <ver>", value="Change client version", inline=False)
+    e.add_field(name="?patchpanel <panel_url>", value="Decompile → replace panel URL → recompile", inline=False)
+    e.add_field(name="?decompile", value="Extract full source code", inline=False)
+    e.add_field(name="?info", value="Deep client analysis", inline=False)
     e.set_footer(text="6767 — Onyx v67")
     await ctx.send(embed=e)
-
-bot.start_time = datetime.now()
 
 @bot.event
 async def on_ready():
@@ -460,6 +707,6 @@ if __name__ == "__main__":
   ██║     ██╔══██╗██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
   ╚██████╗██║  ██║██║  ██║╚██████╗██║  ██╗███████╗██║  ██║
    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-   ─── Aetheria Cracker Bot — Full — 6767 ───
+   ─── Cracker Bot — 9 Commands — 6767 ───
     """)
     bot.run(TOKEN)
